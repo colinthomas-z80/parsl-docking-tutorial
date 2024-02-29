@@ -6,11 +6,24 @@ channels:
 dependencies:
    - python=3.10
    - pip
-
    - autodock-vina
    - mgltools
-   - vmd
-
+   - vmd 
+   - gcc_linux-64 
+   - gxx_linux-64 
+   - gdb 
+   - m4 
+   - perl 
+   - swig 
+   - make 
+   - zlib 
+   - libopenssl-static 
+   - openssl 
+   - conda-pack 
+   - packaging 
+   - cloudpickle 
+   - flake8 
+   - clang-format
    - pip:
       - rdkit
       - scikit-learn
