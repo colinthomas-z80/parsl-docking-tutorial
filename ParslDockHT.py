@@ -142,19 +142,17 @@ from parsl.providers import GridEngineProvider
 from parsl.config import Config
 import parsl
 
-#manager_config=TaskVineManagerConfig(init_command='cp /home/scuzee/parsl-docking-tutorial/* . ; export MGLTOOLS_HOME=/home/scuzee/lsst/lsst_stack/conda/miniconda3-py38_4.9.2/envs/parsldockenv/ ;'),
-
 config = Config(
     executors=[HighThroughputExecutor(
         provider=GridEngineProvider(
             nodes_per_block=5,
-            init_blocks=2,
-            max_blocks=2,
+            init_blocks=10,
+            max_blocks=10,
             worker_init="conda activate parsldockenv; export MGLTOOLS_HOME=$CONDA_PREFIX;",
+#            scheduler_options="#$ -pe smp 12",
         ),
-
-    )]
-)
+    )],
+    )
 parsl.clear()
 parsl.load(config)
 
@@ -213,8 +211,8 @@ predictions.sort_values('score', ascending=True).head(5)
 futures = []
 train_data = []
 smiles_simulated = []
-initial_count = 3
-num_loops = 3
+initial_count = 16
+num_loops = 5
 batch_size = 2
 
 print("Begin New Simulations")
