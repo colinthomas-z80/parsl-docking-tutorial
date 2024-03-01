@@ -42,16 +42,16 @@ def parsl_smi_to_pdb(smiles, outputs=[], inputs=[]):
     return True
 
 @bash_app
-def parsl_set_element(input_pdb, outputs=[], inputs=[]):
+def parsl_set_element(f, outputs=[], inputs=[]):
    
     tcl_script = "set_element.tcl"
     command = (
-        f"vmd -dispdev text -e {tcl_script} -args {input_pdb} {outputs[0]}"
+        f"vmd -dispdev text -e {tcl_script} -args {f} {outputs[0]}"
     )
     return command
 
 @bash_app
-def parsl_pdb_to_pdbqt(input_pdb, outputs=[], ligand = True, inputs=[]):
+def parsl_pdb_to_pdbqt(f, outputs=[], ligand = True, inputs=[]):
     import os
     from pathlib import Path
     autodocktools_path = os.getenv('MGLTOOLS_HOME') 
@@ -64,7 +64,7 @@ def parsl_pdb_to_pdbqt(input_pdb, outputs=[], ligand = True, inputs=[]):
     command = (
         f"{'python2.7'}"
         f" {Path(autodocktools_path) / 'MGLToolsPckgs/AutoDockTools/Utilities24' / script}"
-        f" -{flag} {input_pdb}"
+        f" -{flag} {f}"
         f" -o {outputs[0]}"
         f" -U nphs_lps_waters"
     )
@@ -72,8 +72,8 @@ def parsl_pdb_to_pdbqt(input_pdb, outputs=[], ligand = True, inputs=[]):
 
 @python_app
 def parsl_make_autodock_config(
-    input_receptor,
-    input_ligand,
+    r,
+    l,
     output_pdbqt,
     outputs=[], 
     center=(15.614, 53.380, 15.455), size=(20, 20, 20),
@@ -83,8 +83,8 @@ def parsl_make_autodock_config(
     import os
     # Format configuration file
     file_contents = (
-        f"receptor = {input_receptor}\n"
-        f"ligand = {input_ligand}\n"
+        f"receptor = {r}\n"
+        f"ligand = {l}\n"
         f"center_x = {center[0]}\n"
         f"center_y = {center[1]}\n"
         f"center_z = {center[2]}\n"
@@ -104,12 +104,12 @@ def parsl_make_autodock_config(
     return True
     
 @python_app
-def parsl_autodock_vina(input_config, smiles, num_cpu = 1, inputs=[], outputs=[]):
+def parsl_autodock_vina(smiles, f, num_cpu = 1, inputs=[], outputs=[]):
     import subprocess
 
     autodock_vina_exe = "vina"
     try:
-        command = f"{autodock_vina_exe} --config {input_config} --cpu {num_cpu} --log vinaoutput"
+        command = f"{autodock_vina_exe} --config {f} --cpu {num_cpu} --log vinaoutput"
 	#print(command)
         result = subprocess.check_output(command.split(), encoding="utf-8")
 
@@ -145,7 +145,7 @@ import parsl
 config = Config(
     executors=[TaskVineExecutor(
 	manager_config=TaskVineManagerConfig(init_command='export MGLTOOLS_HOME=$CONDA_PREFIX ;', port=9129, project_name="tv_parsl"),
-	factory_config=TaskVineFactoryConfig(min_workers=10, max_workers=10, worker_options="-d all -o debug_worker", python_env="environment.tar.gz", batch_type="condor"),
+	factory_config=TaskVineFactoryConfig(min_workers=10, max_workers=10, worker_options="-d all -o debug_worker", python_env="environment.tar.gz", batch_type="condor", workers_per_cycle=100 ),
     )]
 )
 parsl.clear()
@@ -155,6 +155,9 @@ parsl.load(config)
 
 train_data = []
 futures = []
+
+set_element_tcl = PFile('set_element.tcl')
+f_receptor = PFile(receptor)
 while len(futures) < 5: 
     
     selected = search_space.sample(1).iloc[0]
@@ -163,12 +166,21 @@ while len(futures) < 5:
     # workflow
     fname = uuid.uuid4().hex
    
-    smi_future = parsl_smi_to_pdb(smiles, outputs=[PFile(f'{fname}.pdb')])
-    element_future = parsl_set_element(smi_future.outputs[0], outputs=[PFile(f'{fname}-coords.pdb')], inputs=[PFile('set_element.tcl')]) 
-    pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[PFile(f'{fname}-coords.pdbqt')])
-    config_future = parsl_make_autodock_config(PFile(receptor), pdbqt_future.outputs[0], 
-                                     '%s-out.pdb' % fname, outputs=[PFile('%s-config.txt' % fname)])
-    dock_future = parsl_autodock_vina(config_future.outputs[0], smiles, outputs=[PFile(f"{fname}-out.pdb")], inputs=[pdbqt_future.outputs[0], PFile(receptor)])
+    f_pdb = PFile('%s.pdb' % fname)
+    f_coords_pdb = PFile(f'{fname}-coords.pdb')
+    f_coords_pdbqt = PFile(f'{fname}-coords.pdbqt')
+    f_config = PFile('%s-config.txt' % fname)
+    f_output = PFile(f"{fname}-out.pdb")
+
+    f_dummy = PFile('dummy')
+    f_dummy2 = PFile('dummy2')
+
+    smi_future = parsl_smi_to_pdb(smiles, outputs=[f_pdb, f_dummy])
+    element_future = parsl_set_element(f_pdb, outputs=[f_coords_pdb, f_dummy], inputs=[smi_future.outputs[1], set_element_tcl]) 
+    pdbqt_future = parsl_pdb_to_pdbqt(f_coords_pdb, inputs=[element_future.outputs[1]], outputs=[f_coords_pdbqt, f_dummy])
+    config_future = parsl_make_autodock_config(f_receptor, f_coords_pdbqt, '%s-out.pdb' % fname, inputs=[pdbqt_future.outputs[1]], outputs=[f_config, f_dummy2])
+
+    dock_future = parsl_autodock_vina(smiles, f_config, outputs=[f_output], inputs=[f_coords_pdbqt, pdbqt_future.outputs[1], f_receptor, config_future.outputs[1]])
 
     futures.append(dock_future)
 
@@ -187,6 +199,8 @@ while len(futures) > 0:
             'time': monotonic()
     })
 
+print("done")
+quit()
 
 # Train the model on those simulations
 from ml_functions import train_model, run_model
@@ -208,6 +222,7 @@ batch_size = 3
 
 print("Begin New Simulations")
 
+
 # start with an initial set of random smiles
 for i in range(initial_count):
     selected = search_space.sample(1).iloc[0]
@@ -215,13 +230,18 @@ for i in range(initial_count):
 
     # workflow
     fname = uuid.uuid4().hex
-    
-    smi_future = parsl_smi_to_pdb(smiles, outputs=[PFile('%s.pdb' % fname)])
-    element_future = parsl_set_element(smi_future.outputs[0], outputs=[PFile(f'{fname}-coords.pdb')], inputs=[PFile('set_element.tcl')]) 
-    pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[PFile(f'{fname}-coords.pdbqt')])
-    config_future = parsl_make_autodock_config(PFile(receptor), pdbqt_future.outputs[0], 
-                                     '%s-out.pdb' % fname, outputs=[PFile('%s-config.txt' % fname)])
-    dock_future = parsl_autodock_vina(config_future.outputs[0], smiles, outputs=[PFile(f"{fname}-out.pdb")], inputs=[pdbqt_future.outputs[0], PFile(receptor)])
+   
+    f_pdb = PFile('%s.pdb' % fname)
+    f_coords_pdb = PFile(f'{fname}-coords.pdb')
+    f_coords_pdbqt = PFile(f'{fname}-coords.pdbqt')
+    f_config = PFile('%s-config.txt' % fname)
+    f_output = PFile(f"{fname}-out.pdb")
+
+    smi_future = parsl_smi_to_pdb(smiles, outputs=[f_pdb])
+    element_future = parsl_set_element(outputs=[f_coords_pdb], inputs=[f_pdb, set_element_tcl]) 
+    pdbqt_future = parsl_pdb_to_pdbqt(inputs=[f_coords_pdb], outputs=[f_coords_pdbqt])
+    config_future = parsl_make_autodock_config('%s-out.pdb' % fname, inputs=[f_receptor, f_coords_pdbqt], outputs=[f_config])
+    dock_future = parsl_autodock_vina(smiles, outputs=[f_output], inputs=[f_config, f_coords_pdbqt, f_receptor])
     futures.append(dock_future)
 
 # wait for all the futures to finish
@@ -238,8 +258,8 @@ while len(futures) > 0:
             'time': monotonic()
     })
     smiles_simulated.append(smiles)
-   
-  
+
+
 # train model, run inference, and run more simulations
 for i in range(num_loops):
     print(f"\nStarting batch {i}")
