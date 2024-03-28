@@ -9,8 +9,9 @@ from parsl.data_provider.files import File as PFile
 from concurrent.futures import as_completed
 from time import monotonic
 from ml_functions import train_model, run_model
+import os
 
-smi_file_name_ligand = 'dataset_orz_original_1k.csv'
+smi_file_name_ligand = '/scratch365/cthoma26/parsl-docking-tutorial/dataset_big_10k.csv'
 
 search_space = pd.read_csv(smi_file_name_ligand)
 search_space = search_space[['TITLE','SMILES']]
@@ -20,8 +21,9 @@ print(search_space.head(5))
 
 # We define new versions of the functions above and annotate them as Parsl apps. To help Parsl track then flow of data between apps we add a new argument "outputs". This is used by Parsl to track the files that are produced by an app such that they can be passed to subsequent apps.
 
-receptor = '1iep_receptor.pdbqt'
-ligand = 'paxalovid-molecule-coords.pdbqt'
+receptor = '/scratch365/cthoma26/parsl-docking-tutorial/1iep_receptor.pdbqt'
+ligand = '/scratch365/cthoma26/parsl-docking-tutorial/paxalovid-molecule-coords.pdbqt'
+
 
 
 @python_app
@@ -44,7 +46,7 @@ def parsl_smi_to_pdb(smiles, outputs=[], inputs=[]):
 @bash_app
 def parsl_set_element(input_pdb, outputs=[], inputs=[]):
    
-    tcl_script = "set_element.tcl"
+    tcl_script = "/scratch365/cthoma26/parsl-docking-tutorial/set_element.tcl"
     command = (
         f"vmd -dispdev text -e {tcl_script} -args {input_pdb} {outputs[0]}"
     )
@@ -52,14 +54,19 @@ def parsl_set_element(input_pdb, outputs=[], inputs=[]):
 
 @bash_app
 def parsl_pdb_to_pdbqt(input_pdb, outputs=[], ligand = True, inputs=[]):
+    print("start")
     import os
     from pathlib import Path
     autodocktools_path = os.getenv('MGLTOOLS_HOME') 
+
+    print("set path, got modules")
 
     # Select the correct settings for ligand or receptor preparation
     script, flag = (
         ("prepare_ligand4.py", "l") if ligand else ("prepare_receptor4.py", "r")
     )
+
+    print("got script")
 
     command = (
         f"{'python2.7'}"
@@ -68,6 +75,7 @@ def parsl_pdb_to_pdbqt(input_pdb, outputs=[], ligand = True, inputs=[]):
         f" -o {outputs[0]}"
         f" -U nphs_lps_waters"
     )
+    print(command)
     return command
 
 @python_app
@@ -77,7 +85,7 @@ def parsl_make_autodock_config(
     output_pdbqt,
     outputs=[], 
     center=(15.614, 53.380, 15.455), size=(20, 20, 20),
-    exhaustiveness=1, num_modes= 20, energy_range = 10,
+    exhaustiveness=2, num_modes= 20, energy_range = 10,
     inputs=[]):
     
     import os
@@ -139,20 +147,26 @@ from parsl.executors.taskvine import TaskVineManagerConfig
 from parsl.executors.taskvine import TaskVineFactoryConfig
 from parsl.executors import HighThroughputExecutor
 from parsl.providers import GridEngineProvider
+from parsl.providers import CondorProvider
 from parsl.config import Config
 import parsl
 
 config = Config(
     executors=[HighThroughputExecutor(
-        provider=GridEngineProvider(
-            nodes_per_block=5,
-            init_blocks=10,
-            max_blocks=10,
-            worker_init="conda activate parsldockenv; export MGLTOOLS_HOME=$CONDA_PREFIX;",
-#            scheduler_options="#$ -pe smp 12",
+        provider=CondorProvider(
+            nodes_per_block=1,
+            init_blocks=100,
+            min_blocks=100,
+            max_blocks=100,
+            worker_init="unset PYTHONPATH; source /scratch365/cthoma26/miniconda3/etc/profile.d/conda.sh; conda activate /scratch365/cthoma26/miniconda3/envs/parsldockenv; export MGLTOOLS_HOME=$CONDA_PREFIX;",
+        #    scheduler_options="#$ -pe smp 12\n#$ -q long",
+            scheduler_options="request_cpus=12",
         ),
     )],
     )
+
+#config.retries=0
+
 parsl.clear()
 parsl.load(config)
 
@@ -168,16 +182,14 @@ while len(futures) < 5:
     # workflow
     fname = uuid.uuid4().hex
    
-    smi_future = parsl_smi_to_pdb(smiles, outputs=[PFile(f'{fname}.pdb')])
-    element_future = parsl_set_element(smi_future.outputs[0], outputs=[PFile(f'{fname}-coords.pdb')], inputs=[PFile('set_element.tcl')]) 
-    pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[PFile(f'{fname}-coords.pdbqt')])
+    smi_future = parsl_smi_to_pdb(smiles, outputs=[PFile(f'/scratch365/cthoma26/parsl-docking-tutorial/{fname}.pdb')])
+    element_future = parsl_set_element(smi_future.outputs[0], outputs=[PFile(f'/scratch365/cthoma26/parsl-docking-tutorial/{fname}-coords.pdb')], inputs=[PFile('/scratch365/cthoma26/parsl-docking-tutorial/set_element.tcl')]) 
+    pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[PFile(f'/scratch365/cthoma26/parsl-docking-tutorial/{fname}-coords.pdbqt')])
     config_future = parsl_make_autodock_config(PFile(receptor), pdbqt_future.outputs[0], 
-                                     '%s-out.pdb' % fname, outputs=[PFile('%s-config.txt' % fname)])
+                                     '/scratch365/cthoma26/parsl-docking-tutorial/%s-out.pdb' % fname, outputs=[PFile('/scratch365/cthoma26/parsl-docking-tutorial/%s-config.txt' % fname)])
     #receptor = 1iep_receptor.pdbqt
     #ligand = 960c376cd8a04972948d339e0b298876-coords.pdbqt
-    dock_future = parsl_autodock_vina(config_future.outputs[0], smiles, outputs=[PFile(f"{fname}-out.pdb")], inputs=[pdbqt_future.outputs[0], PFile(receptor)])
-    cleanup(dock_future, smi_future.outputs[0], element_future.outputs[0], pdbqt_future.outputs[0], 
-            config_future.outputs[0], PFile('%s-out.pdb' % fname))
+    dock_future = parsl_autodock_vina(config_future.outputs[0], smiles, outputs=[PFile(f"/scratch365/cthoma26/parsl-docking-tutorial/{fname}-out.pdb")], inputs=[pdbqt_future.outputs[0], PFile(receptor)])
 
     futures.append(dock_future)
 
@@ -211,9 +223,9 @@ predictions.sort_values('score', ascending=True).head(5)
 futures = []
 train_data = []
 smiles_simulated = []
-initial_count = 16
-num_loops = 5
-batch_size = 2
+initial_count = 5
+num_loops = 10
+batch_size = 500
 
 print("Begin New Simulations")
 
@@ -225,14 +237,14 @@ for i in range(initial_count):
     # workflow
     fname = uuid.uuid4().hex
     
-    smi_future = parsl_smi_to_pdb(smiles, outputs=[PFile('%s.pdb' % fname)])
-    element_future = parsl_set_element(smi_future.outputs[0], outputs=[PFile(f'{fname}-coords.pdb')], inputs=[PFile('set_element.tcl')]) 
-    pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[PFile(f'{fname}-coords.pdbqt')])
+    smi_future = parsl_smi_to_pdb(smiles, outputs=[PFile(f'/scratch365/cthoma26/parsl-docking-tutorial/{fname}.pdb')])
+    element_future = parsl_set_element(smi_future.outputs[0], outputs=[PFile(f'/scratch365/cthoma26/parsl-docking-tutorial/{fname}-coords.pdb')], inputs=[PFile('/scratch365/cthoma26/parsl-docking-tutorial/set_element.tcl')]) 
+    pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[PFile(f'/scratch365/cthoma26/parsl-docking-tutorial/{fname}-coords.pdbqt')])
     config_future = parsl_make_autodock_config(PFile(receptor), pdbqt_future.outputs[0], 
-                                     '%s-out.pdb' % fname, outputs=[PFile('%s-config.txt' % fname)])
-    dock_future = parsl_autodock_vina(config_future.outputs[0], smiles, outputs=[PFile(f"{fname}-out.pdb")], inputs=[pdbqt_future.outputs[0], PFile(receptor)])
-    cleanup(dock_future, smi_future.outputs[0], element_future.outputs[0], pdbqt_future.outputs[0], 
-            config_future.outputs[0], PFile('%s-out.pdb' % fname))
+                                     '/scratch365/cthoma26/parsl-docking-tutorial/%s-out.pdb' % fname, outputs=[PFile('/scratch365/cthoma26/parsl-docking-tutorial/%s-config.txt' % fname)])
+    #receptor = 1iep_receptor.pdbqt
+    #ligand = 960c376cd8a04972948d339e0b298876-coords.pdbqt
+    dock_future = parsl_autodock_vina(config_future.outputs[0], smiles, outputs=[PFile(f"/scratch365/cthoma26/parsl-docking-tutorial/{fname}-out.pdb")], inputs=[pdbqt_future.outputs[0], PFile(receptor)])
 
     futures.append(dock_future)
 
@@ -266,14 +278,14 @@ for i in range(num_loops):
         if smiles not in smiles_simulated:
             fname = uuid.uuid4().hex
 
-            smi_future = parsl_smi_to_pdb(smiles, outputs=[PFile('%s.pdb' % fname)])
-            element_future = parsl_set_element(smi_future.outputs[0], outputs=[PFile(f'{fname}-coords.pdb')], inputs=[PFile('set_element.tcl')]) 
-            pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[PFile(f'{fname}-coords.pdbqt')])
+            smi_future = parsl_smi_to_pdb(smiles, outputs=[PFile(f'/scratch365/cthoma26/parsl-docking-tutorial/{fname}.pdb')])
+            element_future = parsl_set_element(smi_future.outputs[0], outputs=[PFile(f'/scratch365/cthoma26/parsl-docking-tutorial/{fname}-coords.pdb')], inputs=[PFile('/scratch365/cthoma26/parsl-docking-tutorial/set_element.tcl')]) 
+            pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[PFile(f'/scratch365/cthoma26/parsl-docking-tutorial/{fname}-coords.pdbqt')])
             config_future = parsl_make_autodock_config(PFile(receptor), pdbqt_future.outputs[0], 
-                                                      '%s-out.pdb' % fname, outputs=[PFile('%s-config.txt' % fname)])
-            dock_future = parsl_autodock_vina(config_future.outputs[0], smiles, outputs=[PFile(f"{fname}-out.pdb")], inputs=[pdbqt_future.outputs[0], PFile(receptor)])
-            cleanup(dock_future, smi_future.outputs[0], element_future.outputs[0], pdbqt_future.outputs[0], 
-                    config_future.outputs[0], PFile('%s-out.pdb' % fname))
+                                             '/scratch365/cthoma26/parsl-docking-tutorial/%s-out.pdb' % fname, outputs=[PFile('/scratch365/cthoma26/parsl-docking-tutorial/%s-config.txt' % fname)])
+            #receptor = 1iep_receptor.pdbqt
+            #ligand = 960c376cd8a04972948d339e0b298876-coords.pdbqt
+            dock_future = parsl_autodock_vina(config_future.outputs[0], smiles, outputs=[PFile(f"/scratch365/cthoma26/parsl-docking-tutorial/{fname}-out.pdb")], inputs=[pdbqt_future.outputs[0], PFile(receptor)])
 
             futures.append(dock_future)
             
@@ -301,23 +313,3 @@ for i in range(num_loops):
     training_df = pd.concat((training_df, pd.DataFrame(train_data)), ignore_index=True)
 
 
-# ## Plotting progress
-# 
-# We can plot our simulations over time. We see in the plot below the docking score (y-axis) vs application time (x-axis). We show a dashed line of the "best" docking score discovered to date. You should see a step function improving the best candidate over each iteration. You should also see that the individual points tend to get lower over time.
-
-# In[ ]:
-
-
-from matplotlib import pyplot as plt
-
-fig, ax = plt.subplots(figsize=(4.5, 3.))
-
-ax.scatter(training_df['time'], training_df['score'])
-ax.step(training_df['time'], training_df['score'].cummin(), 'k--')
-
-ax.set_xlabel('Walltime (s)')
-ax.set_ylabel('Docking Score)')
-
-fig.tight_layout()
-
-plt.show()
