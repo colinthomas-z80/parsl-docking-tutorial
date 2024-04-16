@@ -10,7 +10,7 @@ from concurrent.futures import as_completed
 from time import monotonic
 from ml_functions import train_model, run_model
 
-smi_file_name_ligand = 'dataset_big_10k.csv'
+smi_file_name_ligand = 'dataset_orz_original_1k.csv'
 
 search_space = pd.read_csv(smi_file_name_ligand)
 search_space = search_space[['TITLE','SMILES']]
@@ -42,7 +42,7 @@ def parsl_smi_to_pdb(smiles, outputs=[], inputs=[]):
     return True
 
 @bash_app
-def parsl_set_element(f, outputs=[], inputs=[]):
+def parsl_set_element(f, outputs=[], inputs=[], stdout="my_stdout"):
    
     tcl_script = "set_element.tcl"
     command = (
@@ -98,7 +98,7 @@ def parsl_make_autodock_config(
         #f"log = {output_log_file}\n"
     )
     # Write configuration file
-    with open(outputs[0].filepath, "w") as f:
+    with open(outputs[0].local_path, "w") as f:
         f.write(file_contents)
         
     return True
@@ -137,6 +137,7 @@ def cleanup(dock_future, pdb, pdb_coords, pdb_qt, autodoc_config, docking):
 from parsl.executors.taskvine import TaskVineExecutor
 from parsl.executors.taskvine import TaskVineManagerConfig
 from parsl.executors.taskvine import TaskVineFactoryConfig
+from parsl.executors.taskvine.stub_staging_provider import StubStaging
 from parsl.config import Config
 import parsl
 
@@ -144,9 +145,9 @@ import parsl
 
 config = Config(
     executors=[TaskVineExecutor(
-	manager_config=TaskVineManagerConfig(init_command='export MGLTOOLS_HOME=$CONDA_PREFIX ;', port=9234, project_name="tv_parsl"),
-        #worker_launch_method="manual",
-	factory_config=TaskVineFactoryConfig(min_workers=100, max_workers=100, worker_options="-d all -o debug_worker", python_env="environment.tar.gz", batch_type="condor", workers_per_cycle=200, cores=12),
+	manager_config=TaskVineManagerConfig(init_command='export MGLTOOLS_HOME=$CONDA_PREFIX ;', port=9129, project_name="tv_parsl"),
+	factory_config=TaskVineFactoryConfig(min_workers=100, max_workers=100, python_env="environment.tar.gz", batch_type="condor", workers_per_cycle=200, cores=12),
+        storage_access=[StubStaging()],
     )]
 )
 parsl.clear()
@@ -167,17 +168,25 @@ while len(futures) < 5:
     # workflow
     fname = uuid.uuid4().hex
    
+    #f_pdb = PFile('taskvinetemp://%s.pdb' % fname)
+    #f_coords_pdb = PFile(f'taskvinetemp://{fname}-coords.pdb')
+    #f_coords_pdbqt = PFile(f'taskvinetemp://{fname}-coords.pdbqt')
+    #f_config = PFile('taskvinetemp://%s-config.txt' % fname)
+    #f_bringback = PFile(f"{fname}-out.pdb")
+    #f_bigfile = PFile(f"taskvinetemp://{fname}-bigfile")
+    
     f_pdb = PFile('%s.pdb' % fname)
     f_coords_pdb = PFile(f'{fname}-coords.pdb')
     f_coords_pdbqt = PFile(f'{fname}-coords.pdbqt')
     f_config = PFile('%s-config.txt' % fname)
     f_bringback = PFile(f"{fname}-out.pdb")
+    f_bigfile = PFile(f"{fname}-bigfile")
 
     smi_future = parsl_smi_to_pdb(smiles, outputs=[f_pdb])
     element_future = parsl_set_element(smi_future.outputs[0], outputs=[f_coords_pdb], inputs=[set_element_tcl]) 
     pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[f_coords_pdbqt])
     config_future = parsl_make_autodock_config(f_receptor, pdbqt_future.outputs[0], '%s-out.pdb' % fname, outputs=[f_config])
-    dock_future = parsl_autodock_vina(smiles, config_future.outputs[0], outputs=[f_bringback], inputs=[pdbqt_future.outputs[0], f_receptor], parsl_resource_specification={'cores':4})
+    dock_future = parsl_autodock_vina(smiles, config_future.outputs[0], outputs=[f_bringback], inputs=[pdbqt_future.outputs[0], f_receptor], parsl_resource_specification={'cores':12})
 
     futures.append(dock_future)
 
@@ -217,7 +226,7 @@ futures = []
 train_data = []
 smiles_simulated = []
 initial_count = 5
-num_loops = 10
+num_loops = 1
 batch_size = 1000
 
 print("Begin New Simulations")
@@ -230,19 +239,26 @@ for i in range(initial_count):
 
     # workflow
     fname = uuid.uuid4().hex
-   
+    
+    #f_pdb = PFile('taskvinetemp://%s.pdb' % fname)
+    #f_coords_pdb = PFile(f'taskvinetemp://{fname}-coords.pdb')
+    #f_coords_pdbqt = PFile(f'taskvinetemp://{fname}-coords.pdbqt')
+    #f_config = PFile('taskvinetemp://%s-config.txt' % fname)
+    #f_bringback = PFile(f"{fname}-out.pdb")
+    #f_bigfile = PFile(f"taskvinetemp://{fname}-bigfile")
+    
     f_pdb = PFile('%s.pdb' % fname)
     f_coords_pdb = PFile(f'{fname}-coords.pdb')
     f_coords_pdbqt = PFile(f'{fname}-coords.pdbqt')
     f_config = PFile('%s-config.txt' % fname)
-    f_output = PFile(f"{fname}-out.pdb")
+    f_bringback = PFile(f"{fname}-out.pdb")
+    #f_bigfile = PFile(f"{fname}-bigfile")
 
     smi_future = parsl_smi_to_pdb(smiles, outputs=[f_pdb])
     element_future = parsl_set_element(smi_future.outputs[0], outputs=[f_coords_pdb], inputs=[set_element_tcl]) 
     pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[f_coords_pdbqt])
     config_future = parsl_make_autodock_config(f_receptor, pdbqt_future.outputs[0], '%s-out.pdb' % fname, outputs=[f_config])
-
-    dock_future = parsl_autodock_vina(smiles, config_future.outputs[0], outputs=[f_output], inputs=[pdbqt_future.outputs[0], f_receptor])
+    dock_future = parsl_autodock_vina(smiles, config_future.outputs[0], outputs=[f_bringback], inputs=[pdbqt_future.outputs[0], f_receptor], parsl_resource_specification={'cores':8})
     
     futures.append(dock_future)
 
@@ -276,19 +292,25 @@ for i in range(num_loops):
         if smiles not in smiles_simulated:
             # workflow
             fname = uuid.uuid4().hex
-           
+     #       f_pdb = PFile('taskvinetemp://%s.pdb' % fname)
+      #      f_coords_pdb = PFile(f'taskvinetemp://{fname}-coords.pdb')
+       #     f_coords_pdbqt = PFile(f'taskvinetemp://{fname}-coords.pdbqt')
+        #    f_config = PFile('taskvinetemp://%s-config.txt' % fname)
+         #   f_bringback = PFile(f"{fname}-out.pdb")
+            #f_bigfile = PFile(f"taskvinetemp://{fname}-bigfile")
+            
             f_pdb = PFile('%s.pdb' % fname)
             f_coords_pdb = PFile(f'{fname}-coords.pdb')
             f_coords_pdbqt = PFile(f'{fname}-coords.pdbqt')
             f_config = PFile('%s-config.txt' % fname)
-            f_output = PFile(f"{fname}-out.pdb")
+            f_bringback = PFile(f"{fname}-out.pdb")
+            #f_bigfile = PFile(f"{fname}-bigfile")
 
             smi_future = parsl_smi_to_pdb(smiles, outputs=[f_pdb])
             element_future = parsl_set_element(smi_future.outputs[0], outputs=[f_coords_pdb], inputs=[set_element_tcl]) 
             pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[f_coords_pdbqt])
             config_future = parsl_make_autodock_config(f_receptor, pdbqt_future.outputs[0], '%s-out.pdb' % fname, outputs=[f_config])
-
-            dock_future = parsl_autodock_vina(smiles, config_future.outputs[0], outputs=[f_output], inputs=[pdbqt_future.outputs[0], f_receptor])
+            dock_future = parsl_autodock_vina(smiles, config_future.outputs[0], outputs=[f_bringback], inputs=[pdbqt_future.outputs[0], f_receptor], parsl_resource_specification={'cores':12})
             
             futures.append(dock_future)
             batch_count += 1
