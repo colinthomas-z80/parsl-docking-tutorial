@@ -10,7 +10,7 @@ from concurrent.futures import as_completed
 from time import monotonic
 from ml_functions import train_model, run_model
 
-smi_file_name_ligand = 'dataset_orz_original_1k.csv'
+smi_file_name_ligand = 'dataset_big_2k.csv'
 
 search_space = pd.read_csv(smi_file_name_ligand)
 search_space = search_space[['TITLE','SMILES']]
@@ -25,7 +25,7 @@ ligand = 'paxalovid-molecule-coords.pdbqt'
 
 
 @python_app
-def parsl_smi_to_pdb(smiles, outputs=[], inputs=[]):
+def parsl_smi_to_pdb(smiles, outputs=[], inputs=[], parsl_resource_specification={'disk':100}):
     from rdkit import Chem
     from rdkit.Chem import AllChem
    
@@ -42,16 +42,16 @@ def parsl_smi_to_pdb(smiles, outputs=[], inputs=[]):
     return True
 
 @bash_app
-def parsl_set_element(f, outputs=[], inputs=[], stdout="my_stdout"):
+def parsl_set_element(f, outputs=[], inputs=[], stdout="my_stdout", parsl_resource_specification={'disk':100}):
    
     tcl_script = "set_element.tcl"
     command = (
-        f"vmd -dispdev text -e {tcl_script} -args {f} {outputs[0]}"
+        f"vmd -dispdev text -e {tcl_script} -args {f} {outputs[0]}; dd if=/dev/zero of={outputs[1]} bs=50M count=1"
     )
     return command
 
 @bash_app
-def parsl_pdb_to_pdbqt(f, outputs=[], ligand = True, inputs=[]):
+def parsl_pdb_to_pdbqt(f, outputs=[], ligand = True, inputs=[], parsl_resource_specification={'disk':100}):
     import os
     from pathlib import Path
     autodocktools_path = os.getenv('MGLTOOLS_HOME') 
@@ -78,7 +78,8 @@ def parsl_make_autodock_config(
     outputs=[], 
     center=(15.614, 53.380, 15.455), size=(20, 20, 20),
     exhaustiveness=1, num_modes= 20, energy_range = 10,
-    inputs=[]):
+    inputs=[],
+    parsl_resource_specification={'disk':100}):
     
     import os
     # Format configuration file
@@ -104,7 +105,7 @@ def parsl_make_autodock_config(
     return True
     
 @python_app
-def parsl_autodock_vina(smiles, f, num_cpu = 1, inputs=[], outputs=[], parsl_resource_specification={'cores':4}):
+def parsl_autodock_vina(smiles, f, num_cpu = 1, inputs=[], outputs=[], parsl_resource_specification={'cores':4, 'disk':100}):
     import subprocess
 
     autodock_vina_exe = "vina"
@@ -137,7 +138,11 @@ def cleanup(dock_future, pdb, pdb_coords, pdb_qt, autodoc_config, docking):
 from parsl.executors.taskvine import TaskVineExecutor
 from parsl.executors.taskvine import TaskVineManagerConfig
 from parsl.executors.taskvine import TaskVineFactoryConfig
-from parsl.executors.taskvine.stub_staging_provider import StubStaging
+from parsl.executors.taskvine.taskvine_staging_provider import TaskVineStaging
+from parsl.data_provider.http import HTTPInTaskStaging
+from parsl.data_provider.ftp import FTPInTaskStaging
+from parsl.data_provider.file_noop import NoOpFileStaging
+from parsl.data_provider.zip import ZipFileStaging
 from parsl.config import Config
 import parsl
 
@@ -146,8 +151,9 @@ import parsl
 config = Config(
     executors=[TaskVineExecutor(
 	manager_config=TaskVineManagerConfig(init_command='export MGLTOOLS_HOME=$CONDA_PREFIX ;', port=9129, project_name="tv_parsl"),
-	factory_config=TaskVineFactoryConfig(min_workers=100, max_workers=100, python_env="environment.tar.gz", batch_type="condor", workers_per_cycle=200, cores=12),
-        storage_access=[StubStaging()],
+	factory_config=TaskVineFactoryConfig(min_workers=1, max_workers=1, python_env="environment.tar.gz", batch_type="local", workers_per_cycle=200),
+    storage_access=[TaskVineStaging(), NoOpFileStaging()],
+    #worker_launch_method="manual",
     )]
 )
 parsl.clear()
@@ -173,20 +179,13 @@ while len(futures) < 5:
     f_coords_pdbqt = PFile(f'taskvinetemp://{fname}-coords.pdbqt')
     f_config = PFile('taskvinetemp://%s-config.txt' % fname)
     f_bringback = PFile(f"{fname}-out.pdb")
-    #f_bigfile = PFile(f"taskvinetemp://{fname}-bigfile")
+    f_bigfile = PFile(f"taskvinetemp://{fname}-bigfile")
     
-    #f_pdb = PFile('%s.pdb' % fname)
-    #f_coords_pdb = PFile(f'{fname}-coords.pdb')
-    #f_coords_pdbqt = PFile(f'{fname}-coords.pdbqt')
-    #f_config = PFile('%s-config.txt' % fname)
-    #f_bringback = PFile(f"{fname}-out.pdb")
-    #f_bigfile = PFile(f"{fname}-bigfile")
-
     smi_future = parsl_smi_to_pdb(smiles, outputs=[f_pdb])
-    element_future = parsl_set_element(smi_future.outputs[0], outputs=[f_coords_pdb], inputs=[set_element_tcl]) 
-    pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[f_coords_pdbqt])
-    config_future = parsl_make_autodock_config(f_receptor, pdbqt_future.outputs[0], '%s-out.pdb' % fname, outputs=[f_config])
-    dock_future = parsl_autodock_vina(smiles, config_future.outputs[0], outputs=[f_bringback], inputs=[pdbqt_future.outputs[0], f_receptor], parsl_resource_specification={'cores':12})
+    element_future = parsl_set_element(smi_future.outputs[0], outputs=[f_coords_pdb, f_bigfile], inputs=[set_element_tcl]) 
+    pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[f_coords_pdbqt], inputs=[element_future.outputs[1]])
+    config_future = parsl_make_autodock_config(f_receptor, pdbqt_future.outputs[0], '%s-out.pdb' % fname, outputs=[f_config], inputs=[element_future.outputs[1]])
+    dock_future = parsl_autodock_vina(smiles, config_future.outputs[0], outputs=[f_bringback], inputs=[pdbqt_future.outputs[0], f_receptor, element_future.outputs[1]])#, parsl_resource_specification={'cores':8})
 
     futures.append(dock_future)
 
@@ -206,9 +205,9 @@ while len(futures) > 0:
     })
 
 
-#print("done")
-#parsl.dfk().cleanup()
-#exit()
+print("done")
+parsl.dfk().cleanup()
+exit()
 
 # Train the model on those simulations
 from ml_functions import train_model, run_model
@@ -226,8 +225,8 @@ futures = []
 train_data = []
 smiles_simulated = []
 initial_count = 5
-num_loops = 1
-batch_size = 1000
+num_loops = 2
+batch_size = 100
 
 print("Begin New Simulations")
 
@@ -245,20 +244,13 @@ for i in range(initial_count):
     f_coords_pdbqt = PFile(f'taskvinetemp://{fname}-coords.pdbqt')
     f_config = PFile('taskvinetemp://%s-config.txt' % fname)
     f_bringback = PFile(f"{fname}-out.pdb")
-    #f_bigfile = PFile(f"taskvinetemp://{fname}-bigfile")
+    f_bigfile = PFile(f"taskvinetemp://{fname}-bigfile")
     
-    #f_pdb = PFile('%s.pdb' % fname)
-    #f_coords_pdb = PFile(f'{fname}-coords.pdb')
-    #f_coords_pdbqt = PFile(f'{fname}-coords.pdbqt')
-    #f_config = PFile('%s-config.txt' % fname)
-    #f_bringback = PFile(f"{fname}-out.pdb")
-    #f_bigfile = PFile(f"{fname}-bigfile")
-
     smi_future = parsl_smi_to_pdb(smiles, outputs=[f_pdb])
-    element_future = parsl_set_element(smi_future.outputs[0], outputs=[f_coords_pdb], inputs=[set_element_tcl]) 
-    pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[f_coords_pdbqt])
-    config_future = parsl_make_autodock_config(f_receptor, pdbqt_future.outputs[0], '%s-out.pdb' % fname, outputs=[f_config])
-    dock_future = parsl_autodock_vina(smiles, config_future.outputs[0], outputs=[f_bringback], inputs=[pdbqt_future.outputs[0], f_receptor], parsl_resource_specification={'cores':8})
+    element_future = parsl_set_element(smi_future.outputs[0], outputs=[f_coords_pdb, f_bigfile], inputs=[set_element_tcl]) 
+    pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[f_coords_pdbqt], inputs=[element_future.outputs[1]])
+    config_future = parsl_make_autodock_config(f_receptor, pdbqt_future.outputs[0], '%s-out.pdb' % fname, outputs=[f_config], inputs=[element_future.outputs[1]])
+    dock_future = parsl_autodock_vina(smiles, config_future.outputs[0], outputs=[f_bringback], inputs=[pdbqt_future.outputs[0], f_receptor, element_future.outputs[1]], parsl_resource_specification={'disk':100})
     
     futures.append(dock_future)
 
@@ -292,25 +284,19 @@ for i in range(num_loops):
         if smiles not in smiles_simulated:
             # workflow
             fname = uuid.uuid4().hex
+
             f_pdb = PFile('taskvinetemp://%s.pdb' % fname)
             f_coords_pdb = PFile(f'taskvinetemp://{fname}-coords.pdb')
             f_coords_pdbqt = PFile(f'taskvinetemp://{fname}-coords.pdbqt')
             f_config = PFile('taskvinetemp://%s-config.txt' % fname)
             f_bringback = PFile(f"{fname}-out.pdb")
-            #f_bigfile = PFile(f"taskvinetemp://{fname}-bigfile")
+            f_bigfile = PFile(f"taskvinetemp://{fname}-bigfile")
             
-            #f_pdb = PFile('%s.pdb' % fname)
-            #f_coords_pdb = PFile(f'{fname}-coords.pdb')
-            #f_coords_pdbqt = PFile(f'{fname}-coords.pdbqt')
-            #f_config = PFile('%s-config.txt' % fname)
-            #f_bringback = PFile(f"{fname}-out.pdb")
-            #f_bigfile = PFile(f"{fname}-bigfile")
-
             smi_future = parsl_smi_to_pdb(smiles, outputs=[f_pdb])
-            element_future = parsl_set_element(smi_future.outputs[0], outputs=[f_coords_pdb], inputs=[set_element_tcl]) 
-            pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[f_coords_pdbqt])
-            config_future = parsl_make_autodock_config(f_receptor, pdbqt_future.outputs[0], '%s-out.pdb' % fname, outputs=[f_config])
-            dock_future = parsl_autodock_vina(smiles, config_future.outputs[0], outputs=[f_bringback], inputs=[pdbqt_future.outputs[0], f_receptor], parsl_resource_specification={'cores':12})
+            element_future = parsl_set_element(smi_future.outputs[0], outputs=[f_coords_pdb, f_bigfile], inputs=[set_element_tcl]) 
+            pdbqt_future = parsl_pdb_to_pdbqt(element_future.outputs[0], outputs=[f_coords_pdbqt], inputs=[element_future.outputs[1]])
+            config_future = parsl_make_autodock_config(f_receptor, pdbqt_future.outputs[0], '%s-out.pdb' % fname, outputs=[f_config], inputs=[element_future.outputs[1]])
+            dock_future = parsl_autodock_vina(smiles, config_future.outputs[0], outputs=[f_bringback], inputs=[pdbqt_future.outputs[0], f_receptor, element_future.outputs[1]])#, parsl_resource_specification={'cores':8})
             
             futures.append(dock_future)
             batch_count += 1
@@ -334,7 +320,6 @@ for i in range(num_loops):
         smiles_simulated.append(smiles)
    
                      
-    training_df = pd.concat((training_df, pd.DataFrame(train_data)), ignore_index=True)
 
 print("done")
 parsl.dfk().cleanup()
